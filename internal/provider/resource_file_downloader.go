@@ -102,8 +102,8 @@ func (r *fileDownloaderResource) Create(ctx context.Context, req resource.Create
 	plan.ID = types.StringValue(checksums.sha1Hex)
 	plan.Sha1 = types.StringValue(checksums.sha1Hex)
 	plan.Sha256 = types.StringValue(checksums.sha256Hex)
-	diags = resp.State.Set(ctx, plan)
-	resp.Diagnostics.Append(diags...)
+
+	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
 
 func (r *fileDownloaderResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
@@ -142,6 +142,12 @@ func (r *fileDownloaderResource) Read(ctx context.Context, req resource.ReadRequ
 		resp.State.RemoveResource(ctx)
 		return
 	}
+
+	state.ID = types.StringValue(checksums.sha1Hex)
+	state.Sha1 = types.StringValue(checksums.sha1Hex)
+	state.Sha256 = types.StringValue(checksums.sha256Hex)
+
+	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
 func (r *fileDownloaderResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
@@ -153,7 +159,29 @@ func (r *fileDownloaderResource) Update(ctx context.Context, req resource.Update
 		return
 	}
 
-	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	method := "GET"
+	if !plan.Method.IsNull() && plan.Method.ValueString() != "" {
+		method = strings.ToUpper(plan.Method.ValueString())
+	}
+
+	headers := make(map[string]string)
+	for k, v := range plan.Headers.Elements() {
+		if strVal, ok := v.(types.String); ok {
+			headers[k] = strVal.ValueString()
+		}
+	}
+
+	checksums, err := downloadFile(method, plan.URL.ValueString(), plan.Filename.ValueString(), headers)
+	if err != nil {
+		resp.Diagnostics.AddError("Download Failed", err.Error())
+		return
+	}
+
+	plan.ID = types.StringValue(checksums.sha1Hex)
+	plan.Sha1 = types.StringValue(checksums.sha1Hex)
+	plan.Sha256 = types.StringValue(checksums.sha256Hex)
+
+	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
 
 func (r *fileDownloaderResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
