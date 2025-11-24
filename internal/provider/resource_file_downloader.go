@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
@@ -35,31 +36,35 @@ func (r *fileDownloaderResource) Schema(_ context.Context, _ resource.SchemaRequ
 		Description: "Resource to download a remote file via HTTP(S) using GET or POST, optionally with custom headers.",
 		Attributes: map[string]schema.Attribute{
 			"url": schema.StringAttribute{
-				Required:    true,
 				Description: "The full HTTP or HTTPS URL to download the file from.",
+				Required:    true,
 			},
 			"filename": schema.StringAttribute{
-				Required:    true,
 				Description: "Local filename where the downloaded file will be saved.",
+				Required:    true,
 			},
 			"method": schema.StringAttribute{
+				Description: "HTTP method to use for the request (default: GET). Only 'GET' and 'POST' are allowed.",
 				Optional:    true,
 				Computed:    true,
-				Description: "HTTP method to use for the request (default: GET). Only 'GET' and 'POST' are allowed.",
 				Validators: []validator.String{
 					stringvalidator.OneOf(http.MethodGet, http.MethodPost),
 				},
 				Default: stringdefault.StaticString(http.MethodGet),
 			},
 			"headers": schema.MapAttribute{
+				Description: "Map of custom HTTP headers to include in the request. The map key is the header name, and the value is the header content.",
 				Optional:    true,
 				ElementType: types.StringType,
-				Description: "Map of custom HTTP headers to include in the request. The map key is the header name, and the value is the header content.",
 				Sensitive:   true,
 			},
+			"force_download": schema.BoolAttribute{
+				Description: "Force download even if the file url has not changed.",
+				Optional:    true,
+			},
 			"id": schema.StringAttribute{
-				Computed:    true,
 				Description: "The hexadecimal encoding of the SHA1 checksum of the downloaded file content.",
+				Computed:    true,
 			},
 			"sha1": schema.StringAttribute{
 				Description: "SHA1 checksum of file content.",
@@ -152,8 +157,10 @@ func (r *fileDownloaderResource) Read(ctx context.Context, req resource.ReadRequ
 
 func (r *fileDownloaderResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
 	var plan fileResourceModel
-
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+
+	var state fileResourceModel
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 
 	if resp.Diagnostics.HasError() {
 		return
@@ -169,6 +176,12 @@ func (r *fileDownloaderResource) Update(ctx context.Context, req resource.Update
 		if strVal, ok := v.(types.String); ok {
 			headers[k] = strVal.ValueString()
 		}
+	}
+
+	if !state.ForceDownload.ValueBool() && plan.URL.ValueString() == state.URL.ValueString() {
+		resp.Diagnostics.AddWarning("same file", plan.URL.ValueString())
+		resp.State.Set(ctx, state)
+		return
 	}
 
 	checksums, err := downloadFile(method, plan.URL.ValueString(), plan.Filename.ValueString(), headers)
@@ -191,16 +204,17 @@ func (r *fileDownloaderResource) Delete(ctx context.Context, req resource.Delete
 }
 
 type fileResourceModel struct {
-	URL      types.String `tfsdk:"url"`
-	Filename types.String `tfsdk:"filename"`
-	Method   types.String `tfsdk:"method"`
-	Headers  types.Map    `tfsdk:"headers"`
-	ID       types.String `tfsdk:"id"`
-	Sha1     types.String `tfsdk:"sha1"`
-	Sha256   types.String `tfsdk:"sha256"`
+	URL           types.String `tfsdk:"url"`
+	Filename      types.String `tfsdk:"filename"`
+	Method        types.String `tfsdk:"method"`
+	Headers       types.Map    `tfsdk:"headers"`
+	ForceDownload types.Bool   `tfsdk:"force_download"`
+	ID            types.String `tfsdk:"id"`
+	Sha1          types.String `tfsdk:"sha1"`
+	Sha256        types.String `tfsdk:"sha256"`
 }
 
-func downloadFile(method, url, filepath string, headers map[string]string) (*fileChecksums, error) {
+func downloadFile(method, url, path string, headers map[string]string) (*fileChecksums, error) {
 	req, err := http.NewRequest(method, url, nil)
 	if err != nil {
 		return nil, err
@@ -221,7 +235,12 @@ func downloadFile(method, url, filepath string, headers map[string]string) (*fil
 		return nil, errors.New("failed to download file: " + resp.Status)
 	}
 
-	out, err := os.Create(filepath)
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+
+	out, err := os.Create(path)
 	if err != nil {
 		return nil, err
 	}
